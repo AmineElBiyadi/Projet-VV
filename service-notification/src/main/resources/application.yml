@@ -1,0 +1,224 @@
+# =============================================================
+#  SGITU — G5 Notifications
+#  application.yml (profil par défaut + profil docker)
+# =============================================================
+
+spring:
+  application:
+    name: notification-service
+
+  # ── Base de données MySQL ─────────────────────────────────
+  datasource:
+    url: jdbc:mysql://localhost:3314/notifications_db?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Casablanca
+    username: sgitu
+    password: ${MYSQL_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQL8Dialect
+        format_sql: true
+
+  # ── Kafka ─────────────────────────────────────────────────
+  kafka:
+    bootstrap-servers: localhost:9093
+
+    # ── Consommateur : résilience ───────────────────────────
+    consumer:
+      group-id: notification-group
+      auto-offset-reset: earliest          # Rejouer depuis le début si pas d'offset
+      enable-auto-commit: false            # Commit manuel — AckMode.MANUAL dans KafkaConfig.java
+      max-poll-records: 10                 # Max messages par poll (évite la surcharge)
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "ma.sgitu.g5.notifications.dto.kafka"
+        session.timeout.ms: 30000          # Délai avant que le broker considère le consumer mort
+        heartbeat.interval.ms: 10000       # Fréquence des heartbeats (doit être < session.timeout)
+
+    # ── Producteur : fiabilité pour les DLT ─────────────────
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      retries: 3                           # Nombre de retentatives en cas d'erreur réseau
+      acks: all                            # Attendre l'ACK de tous les réplicas (durabilité max)
+      properties:
+        enable.idempotence: true           # Garantit exactly-once delivery côté producteur
+        max.in.flight.requests.per.connection: 5  # Compatible avec l'idempotence
+
+    template:
+      default-topic: token-validation
+
+  # ── Mail (MailHog en dev) ─────────────────────────────────
+  mail:
+    host: localhost
+    port: 1026
+    protocol: smtp
+    default-encoding: UTF-8
+    properties:
+      mail:
+        smtp:
+          auth: false
+          starttls:
+            enable: false
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
+
+# ── JWT (fourni par G10) ────────────────────────────────────
+jwt:
+  secret: ${JWT_SECRET}
+  expiration: 86400000  # 24 heures en millisecondes
+
+# ── Firebase (FCM) ─────────────────────────────────────────
+firebase:
+  credentials:
+    path: ${FIREBASE_CREDENTIALS_PATH:}
+
+# ── Twilio (SMS) ───────────────────────────────────────────
+twilio:
+  account-sid: ${TWILIO_ACCOUNT_SID:}
+  auth-token: ${TWILIO_AUTH_TOKEN:}
+  from-phone: ${TWILIO_FROM_PHONE:}
+
+# ── Configuration G5 ────────────────────────────────────────
+g5:
+  # Retry configuration
+  retry:
+    max-attempts: 3
+    initial-interval: 60000      # 1 minute
+    multiplier: 2.0              # exponentiel : 1min, 2min, 4min
+  
+  # Canaux supportés
+  channels:
+    enabled: EMAIL,SMS,PUSH
+  
+  # Templates par défaut
+  templates:
+    default-language: fr
+
+  # Kafka topics G5
+  kafka:
+    g7-log-topic: g7.log-alerts
+    g9-notifications-topic: notifications
+
+# ── Resilience4j — Circuit Breaker ──────────────────────────
+resilience4j:
+  circuitbreaker:
+    instances:
+      notificationProvider:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10            # Fenêtre de 10 appels pour calculer le taux d'échec
+        failure-rate-threshold: 50         # Ouvrir le circuit si ≥ 50% d'échecs
+        wait-duration-in-open-state: 30s   # Attendre 30s avant de passer en HALF_OPEN
+        permitted-number-of-calls-in-half-open-state: 3  # Appels test en HALF_OPEN
+        automatic-transition-from-open-to-half-open-enabled: true
+        register-health-indicator: true
+
+# ── Logging ─────────────────────────────────────────────────
+logging:
+  level:
+    ma.sgitu.g5: DEBUG
+    ma.sgitu.g5.admin: INFO
+    ma.sgitu.g5.security: INFO
+    ma.sgitu.g5.service.TracingServiceImpl: INFO
+    ma.sgitu.g5.service.RetryServiceImpl: INFO
+    ma.sgitu.g5.service.RetryScheduler: INFO
+    ma.sgitu.g5.provider.LogFileAdapter: INFO
+    ma.sgitu.g5.notifications.log: INFO
+    org.springframework.kafka: INFO
+    org.springframework.mail: DEBUG
+    org.springframework.security: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/notification-service.log
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 30
+  config: classpath:logback-admin.xml
+
+# ── Server ──────────────────────────────────────────────────
+server:
+  port: 8085
+  servlet:
+    context-path: /
+  error:
+    include-message: always
+    include-binding-errors: always
+
+# ── SpringDoc / OpenAPI ─────────────────────────────────────
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+  show-actuator: true
+
+# ── Observabilité & Monitoring (Actuator + Prometheus) ──────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+---
+# =============================================================
+#  PROFIL DOCKER (activé via SPRING_PROFILES_ACTIVE=docker)
+# =============================================================
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+  datasource:
+    url: jdbc:mysql://mysql-notification:3306/notifications_db?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Casablanca
+    username: sgitu
+    password: ${MYSQL_PASSWORD}
+
+  kafka:
+    bootstrap-servers: kafka:9092
+    consumer:
+      enable-auto-commit: false
+      max-poll-records: 10
+      properties:
+        session.timeout.ms: 30000
+        heartbeat.interval.ms: 10000
+    producer:
+      retries: 3
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+
+  mail:
+    host: ${MAIL_HOST}
+    port: ${MAIL_PORT}
+    username: ${MAIL_USERNAME}
+    password: ${MAIL_PASSWORD}
+    from: ${MAIL_FROM}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+
+jwt:
+  secret: ${JWT_SECRET}
+
+logging:
+  level:
+    ma.sgitu.g5.notifications: INFO
